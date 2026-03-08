@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 FraudDecision = Literal["APPROVE", "REJECT", "REVIEW"]
 
 
-def run_fraud_detection(features: FraudFeatureVector) -> tuple[FraudDecision, str]:
+def run_fraud_detection(features: FraudFeatureVector) -> tuple[FraudDecision, str | None]:
     """
     Mock fraud detection engine.
 

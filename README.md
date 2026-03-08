@@ -1,140 +1,171 @@
-# TrustiPay Central Ledger Backend
+# TrustiPay Central Ledger Backend (Queue-First)
 
-Offline-first P2P digital payment settlement backend built with **Python + FastAPI + SQLite**.
+TrustiPay is an offline-first peer-to-peer digital payment research prototype.
 
----
+This backend receives transaction submissions from mobile apps, queues them durably in SQLite, then processes each transaction one-by-one through security verification and settlement checks before writing outcomes to the central ledger.
 
-## Quick Start
+## Key Features
 
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Run the server (from the project root)
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Browse to:
-- **Swagger UI** → http://localhost:8000/docs
-- **ReDoc**       → http://localhost:8000/redoc
-- **OpenAPI JSON**→ http://localhost:8000/openapi.json
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/v1/transactions/submit` | Submit transaction for settlement |
-| `GET`  | `/v1/transactions/{tx_id}` | Get transaction status |
-| `GET`  | `/v1/transactions` | Full ledger export (with filters) |
-| `GET`  | `/v1/transactions/chain/verify` | Verify hash chain integrity |
-| `GET`  | `/v1/devices/{device_id}/balance` | Get device balance |
-| `GET`  | `/v1/devices/{device_id}/ledger-sync` | Sync device transaction history |
-| `GET`  | `/v1/devices` | List all devices |
-| `GET`  | `/health` | Health check |
-
----
-
-## Example: Submit a Transaction
-
-```bash
-curl -X POST http://localhost:8000/v1/transactions/submit \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tx_id":            "TXN-001",
-    "sender_id":        "DEV-ALICE",
-    "receiver_id":      "DEV-BOB",
-    "timestamp":        "2024-06-01T10:30:00Z",
-    "amount":           150.00,
-    "transaction_type": "QR",
-    "device_type":      "Samsung Galaxy S23",
-    "network_type":     "offline",
-    "phone_number":     "+94771234567",
-    "location":         "Western Province",
-    "prev_hash":        "0000000000000000000000000000000000000000000000000000000000000000",
-    "tx_hash":          "placeholder",
-    "signature":        "BYPASS"
-  }'
-```
-
-Response:
-```json
-{"tx_id": "TXN-001", "status": "approved", "trace_id": "TRACE-ABC123"}
-```
-
----
+- FastAPI + SQLAlchemy + SQLite
+- Queue-first asynchronous processing
+- Separate online and offline batch ingestion endpoints
+- Outbound security verification call (configurable HTTP POST)
+- Post-security validation + fraud stub + additional checks hook
+- Central ledger with approved/rejected/security_review outcomes
+- Approved-only tamper-evident hash chain
+- Device balance settlement for approved transactions
+- Swagger/OpenAPI docs at `/docs` and `/openapi.json`
 
 ## Project Structure
 
-```
+```text
 trustipay-ledger-backend/
 ├── app/
-│   ├── main.py              # FastAPI app + lifespan
-│   ├── database.py          # SQLAlchemy engine + session
-│   ├── models.py            # ORM models (central_ledger, device_balances)
-│   ├── schemas.py           # Pydantic request/response models
+│   ├── main.py
+│   ├── config.py
+│   ├── database.py
+│   ├── models.py
+│   ├── schemas.py
 │   ├── routers/
-│   │   ├── transactions.py  # POST /submit, GET /{tx_id}, GET / (full ledger)
-│   │   └── devices.py       # GET /balance, GET /ledger-sync
+│   │   ├── transactions.py
+│   │   └── devices.py
 │   └── services/
-│       ├── validation_service.py  # Full validation pipeline
-│       ├── fraud_service.py       # Mock fraud detection engine
-│       ├── hash_service.py        # SHA-256 hash chain logic
-│       └── ledger_service.py      # Atomic settlement orchestrator
+│       ├── queue_service.py
+│       ├── queue_processor_service.py
+│       ├── security_service.py
+│       ├── additional_checks_service.py
+│       ├── validation_service.py
+│       ├── fraud_service.py
+│       ├── hash_service.py
+│       └── ledger_service.py
+├── docs/
+│   ├── architecture.md
+│   ├── api-contracts.md
+│   ├── security-integration.md
+│   └── processing-runbook.md
+├── tests/
+│   └── test_queue_flow.py
 ├── requirements.txt
 └── README.md
 ```
 
----
+## Quick Start
 
-## Validation Pipeline
+```bash
+# 1) create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate
 
-```
-Mobile Payload
-     │
-     ▼
-1. Schema Validation      ← Pydantic
-2. Duplicate Check        ← tx_id uniqueness
-3. Signature Verify       ← ECDSA stub (use "BYPASS" for testing)
-4. Hash Recompute         ← SHA-256 integrity check
-5. Balance Computation    ← Server-computed (never trusted from client)
-6. Balance Validation     ← Reject if sender insufficient
-7. Fraud Feature Build    ← Combine payload + balances
-8. Fraud Detection        ← APPROVE / REJECT / REVIEW
-9. Atomic Settlement      ← Ledger + balance update
+# 2) install dependencies
+pip install -r requirements.txt
+
+# 3) run API
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
----
+Open:
 
-## Fraud Detection Rules (Mock)
+- Swagger UI: `http://localhost:8000/docs`
+- OpenAPI: `http://localhost:8000/openapi.json`
 
-| Condition | Decision | Reason Code |
-|-----------|----------|-------------|
-| amount > 50,000 | REJECT | AMOUNT_EXCEEDS_LIMIT |
-| newbal_sender < 0 | REJECT | INSUFFICIENT_FUNDS |
-| amount > 10,000 AND network=offline | REVIEW | HIGH_VALUE_OFFLINE |
-| location empty/unknown | REVIEW | MISSING_LOCATION |
-| All others | APPROVE | — |
+## Environment Variables
 
-Replace `fraud_service.py` with your ML model to upgrade from stub to production.
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `sqlite:///./trustipay.db` | Database connection |
+| `ENABLE_QUEUE_WORKER` | `true` | Enable in-process sequential queue worker |
+| `QUEUE_POLL_INTERVAL_SECONDS` | `1.0` | Worker poll sleep when no jobs |
+| `QUEUE_MAX_SECURITY_RETRIES` | `3` | Max retries for security transport/5xx failures |
+| `QUEUE_RETRY_BACKOFF_SECONDS` | `2.0` | Retry backoff multiplier |
+| `SECURITY_ENDPOINT_URL` | empty | External security verification endpoint |
+| `SECURITY_TIMEOUT_SECONDS` | `5.0` | Security endpoint request timeout |
 
----
+## API Summary
 
-## Hash Chain
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/v1/transactions/online` | Enqueue one online transaction |
+| `POST` | `/v1/transactions/offline-sync` | Enqueue offline batch (array) |
+| `POST` | `/v1/transactions/submit` | Deprecated alias of `/online` |
+| `GET` | `/v1/transactions/{tx_id}` | Get status (queue + ledger resolved) |
+| `GET` | `/v1/transactions` | List settled ledger rows |
+| `GET` | `/v1/transactions/queue` | Inspect queue rows |
+| `GET` | `/v1/transactions/chain/verify` | Verify approved-only hash chain |
+| `GET` | `/v1/devices/{device_id}/balance` | Get settled device balance |
+| `GET` | `/v1/devices/{device_id}/ledger-sync` | Device reconciliation |
+| `GET` | `/health` | Service health |
 
-Only **approved** transactions extend the chain:
+## Status Model
 
+Public statuses:
+
+- `queued`
+- `processing`
+- `security_review`
+- `approved`
+- `rejected`
+- `duplicate`
+
+### Eventual Consistency
+
+Submission endpoints only enqueue work and return immediately.
+Final settlement decisions are asynchronous; clients must poll `GET /v1/transactions/{tx_id}`.
+
+## Example Requests
+
+### Enqueue Online
+
+```bash
+curl -X POST http://localhost:8000/v1/transactions/online \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tx_id": "TXN-ONLINE-001",
+    "sender_id": "DEV-ALICE",
+    "receiver_id": "DEV-BOB",
+    "timestamp": "2026-03-08T10:30:00Z",
+    "amount": 150.00,
+    "transaction_type": "QR",
+    "device_type": "Pixel 8",
+    "network_type": "offline",
+    "phone_number": "+94771234567",
+    "location": "Western Province",
+    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tx_hash": "<client-computed-hash>",
+    "signature": "BYPASS"
+  }'
 ```
-Genesis (0x000...000)
-    │
-    └─► TX-001.tx_hash ◄── prev_hash=genesis
-           │
-           └─► TX-002.tx_hash ◄── prev_hash=TX-001.tx_hash
-                  │
-                  └─► TX-003.tx_hash ◄── ...
+
+### Enqueue Offline Batch
+
+```bash
+curl -X POST http://localhost:8000/v1/transactions/offline-sync \
+  -H "Content-Type: application/json" \
+  -d '[{...},{...}]'
 ```
 
-Rejected/review transactions store `prev_hash = NULL` and do not extend the chain.
+## Processing Flow
 
-Verify chain integrity: `GET /v1/transactions/chain/verify`
+1. Client submits online or offline batch item.
+2. Server validates schema and enqueues as `queued`.
+3. Background worker claims one queue row (`processing`).
+4. Worker calls security endpoint via HTTP POST.
+5. On security `PASS`: run additional checks, validation, fraud stub.
+6. Write outcome into `central_ledger`:
+   - `approved`: update balances and extend hash chain
+   - `rejected` or `security_review`: no chain extension, no balance update
+7. Queue row becomes `completed` with final status.
+
+## Testing
+
+Service integration tests (enqueue + processor + status resolution):
+
+```bash
+python -m unittest tests/test_queue_flow.py
+```
+
+## Documentation Index
+
+- [Architecture](docs/architecture.md)
+- [API Contracts](docs/api-contracts.md)
+- [Security Integration](docs/security-integration.md)
+- [Processing Runbook](docs/processing-runbook.md)
