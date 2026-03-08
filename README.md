@@ -14,6 +14,7 @@ This backend receives transaction submissions from mobile apps, queues them dura
 - Central ledger with approved/rejected/security_review outcomes
 - Approved-only tamper-evident hash chain
 - Device balance settlement for approved transactions
+- Streamlit dashboard for queue flow and ledger observation
 - Swagger/OpenAPI docs at `/docs` and `/openapi.json`
 
 ## Project Structure
@@ -45,6 +46,7 @@ trustipay-ledger-backend/
 │   └── processing-runbook.md
 ├── tests/
 │   └── test_queue_flow.py
+├── streamlit_dashboard.py
 ├── requirements.txt
 └── README.md
 ```
@@ -61,12 +63,16 @@ pip install -r requirements.txt
 
 # 3) run API
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+
+# 4) (optional) run dashboard in another terminal
+streamlit run streamlit_dashboard.py
 ```
 
 Open:
 
 - Swagger UI: `http://localhost:8000/docs`
 - OpenAPI: `http://localhost:8000/openapi.json`
+- Streamlit Dashboard: `http://localhost:8501`
 
 ## Environment Variables
 
@@ -154,6 +160,16 @@ curl -X POST http://localhost:8000/v1/transactions/offline-sync \
    - `approved`: update balances and extend hash chain
    - `rejected` or `security_review`: no chain extension, no balance update
 7. Queue row becomes `completed` with final status.
+
+## Dashboard
+
+`streamlit_dashboard.py` provides three views:
+
+- `Flow Monitor`: queue state breakdown, pending jobs, and recent queue activity
+- `Central Ledger`: filterable ledger table + approved chain preview
+- `Device Balances`: latest settled balances per device
+
+The dashboard reads from the same SQLite database (`DATABASE_URL`) used by the backend.
 
 ## Testing
 

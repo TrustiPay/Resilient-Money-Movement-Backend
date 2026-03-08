@@ -40,3 +40,8 @@ trustipay.db
 *.sqlite
 *.sqlite3
 *.log
+
+# Environment files
+.env
+.env.*
+!.env.example
