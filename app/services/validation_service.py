@@ -21,6 +21,29 @@ def is_duplicate_ledger(db: Session, tx_id: str) -> bool:
     return db.query(CentralLedger).filter(CentralLedger.tx_id == tx_id).first() is not None
 
 
+def get_ledger_tx(db: Session, tx_id: str) -> CentralLedger | None:
+    return db.query(CentralLedger).filter(CentralLedger.tx_id == tx_id).first()
+
+
+def is_double_spend(db: Session, payload: TransactionSubmitRequest) -> bool:
+    """
+    Prototype double-spend guard:
+    same sender + amount + timestamp already seen in active/final ledger states.
+    """
+    return (
+        db.query(CentralLedger)
+        .filter(
+            CentralLedger.sender_id == payload.sender_id,
+            CentralLedger.amount == payload.amount,
+            CentralLedger.timestamp == payload.timestamp,
+            CentralLedger.tx_id != payload.tx_id,
+            CentralLedger.status.in_(["queued", "fraud_detection_pending", "approved", "security_review"]),
+        )
+        .first()
+        is not None
+    )
+
+
 def get_or_create_balance(db: Session, device_id: str) -> DeviceBalance:
     bal = db.query(DeviceBalance).filter(DeviceBalance.device_id == device_id).first()
     if not bal:
@@ -53,15 +76,21 @@ def run_post_security_validation(
     db: Session,
     payload: TransactionSubmitRequest,
 ) -> tuple[float, float, float, float, str]:
-    if is_duplicate_ledger(db, payload.tx_id):
-        raise ValidationError("DUPLICATE_TX", f"Transaction {payload.tx_id} already exists")
+    if not verify_client_hash(payload):
+        logger.warning("[VALIDATION] Hash mismatch tx=%s", payload.tx_id)
+        raise ValidationError("HASH_MISMATCH", "Transaction hash does not match recomputed value")
 
     if not verify_signature(payload):
         raise ValidationError("INVALID_SIGNATURE", "Signature verification failed")
 
-    if not verify_client_hash(payload):
-        logger.warning("[VALIDATION] Hash mismatch tx=%s", payload.tx_id)
-        raise ValidationError("HASH_MISMATCH", "Transaction hash does not match recomputed value")
+    if is_double_spend(db, payload):
+        raise ValidationError("DOUBLE_SPEND", "Potential double spend pattern detected")
+
+    existing = get_ledger_tx(db, payload.tx_id)
+    if existing and not (
+        existing.status == "rejected" and existing.reason_code == "INSUFFICIENT_FUNDS"
+    ):
+        raise ValidationError("DUPLICATE_TX", f"Transaction {payload.tx_id} already exists")
 
     sender_bal = get_or_create_balance(db, payload.sender_id)
     receiver_bal = get_or_create_balance(db, payload.receiver_id)

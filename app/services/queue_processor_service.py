@@ -11,15 +11,8 @@ from app.database import SessionLocal
 from app.models import TransactionQueue
 from app.schemas import TransactionSubmitRequest
 from app.services.additional_checks_service import run_additional_checks
-from app.services.fraud_service import run_fraud_detection
-from app.services.ledger_service import (
-    build_fraud_features,
-    record_approved,
-    record_rejected,
-    record_review,
-)
-from app.services.security_service import SecurityTransportError, verify_transaction
-from app.services.validation_service import ValidationError, is_duplicate_ledger, run_post_security_validation
+from app.services.ledger_service import ensure_pending_fraud, record_rejected
+from app.services.validation_service import ValidationError, run_post_security_validation
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +29,18 @@ def _mark_completed(item: TransactionQueue, final_status: str, reason_code: str 
     item.processed_at = _now()
 
 
-def _mark_retry(item: TransactionQueue, error_message: str) -> None:
+def _mark_balance_retry(item: TransactionQueue) -> None:
     item.attempts += 1
-    item.state = "retry_wait"
-    item.last_error = error_message
-    item.next_attempt_at = _now() + timedelta(
-        seconds=settings.QUEUE_RETRY_BACKOFF_SECONDS * max(item.attempts, 1)
-    )
+    item.state = "retry_balance"
+    item.reason_code = "INSUFFICIENT_FUNDS"
+    item.next_attempt_at = _now() + timedelta(seconds=settings.QUEUE_POLL_INTERVAL_SECONDS * 5)
 
 
 def _claim_next_item(db: Session) -> TransactionQueue | None:
     now = _now()
     item = (
         db.query(TransactionQueue)
-        .filter(TransactionQueue.state.in_(["queued", "retry_wait"]))
+        .filter(TransactionQueue.state.in_(["queued", "retry_balance"]))
         .filter(
             or_(
                 TransactionQueue.next_attempt_at.is_(None),
@@ -70,8 +61,50 @@ def _claim_next_item(db: Session) -> TransactionQueue | None:
     return item
 
 
-def _record_duplicate_completion(db: Session, item: TransactionQueue, reason_code: str = "DUPLICATE_TX") -> None:
-    _mark_completed(item, "duplicate", reason_code=reason_code)
+def _process_online(db: Session, item: TransactionQueue, payload: TransactionSubmitRequest) -> None:
+    ensure_pending_fraud(db, payload, trace_id=item.trace_id, status="fraud_detection_pending")
+    _mark_completed(item, "fraud_detection_pending")
+    db.commit()
+
+
+def _process_offline(db: Session, item: TransactionQueue, payload: TransactionSubmitRequest) -> None:
+    try:
+        (
+            oldbal_sender,
+            newbal_sender,
+            oldbal_receiver,
+            newbal_receiver,
+            _server_prev_hash,
+        ) = run_post_security_validation(db, payload)
+    except ValidationError as exc:
+        # Keep writing rejected state in central ledger; insufficient funds remains retry-eligible.
+        record_rejected(db=db, payload=payload, reason_code=exc.reason_code, trace_id=item.trace_id)
+        if exc.reason_code == "INSUFFICIENT_FUNDS":
+            _mark_balance_retry(item)
+            db.commit()
+            return
+        if exc.reason_code == "DUPLICATE_TX":
+            _mark_completed(item, "rejected", reason_code=exc.reason_code)
+            db.commit()
+            return
+        _mark_completed(item, "rejected", reason_code=exc.reason_code)
+        db.commit()
+        return
+
+    passed, additional_reason = run_additional_checks(payload.model_dump())
+    if not passed:
+        reason_code = additional_reason or "ADDITIONAL_CHECK_FAILED"
+        record_rejected(db=db, payload=payload, reason_code=reason_code, trace_id=item.trace_id)
+        _mark_completed(item, "rejected", reason_code=reason_code)
+        db.commit()
+        return
+
+    pending_row = ensure_pending_fraud(db, payload, trace_id=item.trace_id, status="fraud_detection_pending")
+    pending_row.oldbal_sender = oldbal_sender
+    pending_row.newbal_sender = newbal_sender
+    pending_row.oldbal_receiver = oldbal_receiver
+    pending_row.newbal_receiver = newbal_receiver
+    _mark_completed(item, "fraud_detection_pending")
     db.commit()
 
 
@@ -86,128 +119,11 @@ def _process_item(db: Session, item: TransactionQueue) -> None:
         db.commit()
         return
 
-    if is_duplicate_ledger(db, payload.tx_id):
-        _record_duplicate_completion(db, item)
+    if item.source_type == "online":
+        _process_online(db, item, payload)
         return
 
-    try:
-        security_result = verify_transaction(payload.model_dump())
-        item.security_decision = security_result.decision
-        item.security_reason = security_result.reason
-    except SecurityTransportError as exc:
-        logger.warning("[QUEUE] Security transport error tx=%s err=%s", item.tx_id, exc)
-        if item.attempts + 1 < item.max_attempts:
-            _mark_retry(item, str(exc))
-            db.commit()
-            return
-
-        item.attempts += 1
-        item.security_decision = "REVIEW"
-        item.security_reason = "SECURITY_UNAVAILABLE"
-        record_review(
-            db=db,
-            payload=payload,
-            reason_code="SECURITY_UNAVAILABLE",
-            trace_id=item.trace_id,
-        )
-        _mark_completed(item, "security_review", reason_code="SECURITY_UNAVAILABLE")
-        item.last_error = str(exc)
-        db.commit()
-        return
-
-    if security_result.decision == "FAIL":
-        reason_code = security_result.reason or "SECURITY_FAIL"
-        record_rejected(db=db, payload=payload, reason_code=reason_code, trace_id=item.trace_id)
-        _mark_completed(item, "rejected", reason_code=reason_code)
-        db.commit()
-        return
-
-    if security_result.decision == "REVIEW":
-        reason_code = security_result.reason or "SECURITY_REVIEW"
-        record_review(db=db, payload=payload, reason_code=reason_code, trace_id=item.trace_id)
-        _mark_completed(item, "security_review", reason_code=reason_code)
-        db.commit()
-        return
-
-    passed, additional_reason = run_additional_checks(payload.model_dump())
-    if not passed:
-        reason_code = additional_reason or "ADDITIONAL_CHECK_FAILED"
-        record_rejected(db=db, payload=payload, reason_code=reason_code, trace_id=item.trace_id)
-        _mark_completed(item, "rejected", reason_code=reason_code)
-        db.commit()
-        return
-
-    try:
-        (
-            oldbal_sender,
-            newbal_sender,
-            oldbal_receiver,
-            newbal_receiver,
-            server_prev_hash,
-        ) = run_post_security_validation(db, payload)
-    except ValidationError as exc:
-        if exc.reason_code == "DUPLICATE_TX":
-            _record_duplicate_completion(db, item)
-            return
-
-        record_rejected(db=db, payload=payload, reason_code=exc.reason_code, trace_id=item.trace_id)
-        _mark_completed(item, "rejected", reason_code=exc.reason_code)
-        db.commit()
-        return
-
-    features = build_fraud_features(
-        payload=payload,
-        oldbal_sender=oldbal_sender,
-        newbal_sender=newbal_sender,
-        oldbal_receiver=oldbal_receiver,
-        newbal_receiver=newbal_receiver,
-    )
-    fraud_decision, fraud_reason = run_fraud_detection(features)
-
-    if fraud_decision == "REJECT":
-        reason_code = fraud_reason or "FRAUD_REJECT"
-        record_rejected(
-            db=db,
-            payload=payload,
-            reason_code=reason_code,
-            trace_id=item.trace_id,
-            oldbal_sender=oldbal_sender,
-            newbal_sender=newbal_sender,
-            oldbal_receiver=oldbal_receiver,
-            newbal_receiver=newbal_receiver,
-        )
-        _mark_completed(item, "rejected", reason_code=reason_code)
-        db.commit()
-        return
-
-    if fraud_decision == "REVIEW":
-        reason_code = fraud_reason or "FRAUD_REVIEW"
-        record_review(
-            db=db,
-            payload=payload,
-            reason_code=reason_code,
-            trace_id=item.trace_id,
-            oldbal_sender=oldbal_sender,
-            newbal_sender=newbal_sender,
-            oldbal_receiver=oldbal_receiver,
-            newbal_receiver=newbal_receiver,
-        )
-        _mark_completed(item, "security_review", reason_code=reason_code)
-        db.commit()
-        return
-
-    record_approved(
-        db=db,
-        payload=payload,
-        trace_id=item.trace_id,
-        oldbal_sender=oldbal_sender,
-        newbal_sender=newbal_sender,
-        oldbal_receiver=oldbal_receiver,
-        newbal_receiver=newbal_receiver,
-        server_prev_hash=server_prev_hash,
-    )
-    _mark_completed(item, "approved")
-    db.commit()
+    _process_offline(db, item, payload)
 
 
 def process_next_queue_item() -> bool:
@@ -217,7 +133,7 @@ def process_next_queue_item() -> bool:
         if not item:
             return False
 
-        logger.info("[QUEUE] processing tx=%s queue_id=%s", item.tx_id, item.queue_id)
+        logger.info("[QUEUE] processing tx=%s queue_id=%s source=%s", item.tx_id, item.queue_id, item.source_type)
         _process_item(db, item)
         return True
     except Exception:

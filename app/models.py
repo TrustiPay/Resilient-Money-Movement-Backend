@@ -59,3 +59,19 @@ class TransactionQueue(Base):
     processed_at      = Column(DateTime(timezone=True), nullable=True)
     created_at        = Column(DateTime(timezone=True), server_default=func.now())
     updated_at        = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class DeviceTransactionHistory(Base):
+    __tablename__ = "device_transaction_history"
+
+    history_id      = Column(Integer, primary_key=True, autoincrement=True)
+    tx_id           = Column(String, unique=True, nullable=False, index=True)
+    sender_id       = Column(String, nullable=False, index=True)
+    receiver_id     = Column(String, nullable=False, index=True)
+    amount          = Column(Float, nullable=False)
+    status          = Column(String, nullable=False, index=True)
+    source_type     = Column(String, nullable=False)
+    reason_code     = Column(String, nullable=True)
+    trace_id        = Column(String, nullable=True)
+    synced_at       = Column(DateTime(timezone=True), server_default=func.now())
+    last_updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

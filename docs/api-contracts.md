@@ -6,39 +6,38 @@ Base URL examples assume `http://localhost:8000`.
 
 ```json
 {
-  "tx_id": "string",
-  "sender_id": "string",
-  "receiver_id": "string",
-  "timestamp": "string",
-  "amount": 0,
-  "transaction_type": "string",
-  "device_type": "string",
-  "network_type": "string",
-  "phone_number": "string",
-  "location": "string",
-  "prev_hash": "string",
-  "tx_hash": "string",
-  "signature": "string"
+  "tx_id": "TXN-001",
+  "sender_id": "DEV-A",
+  "receiver_id": "DEV-B",
+  "timestamp": "2026-03-09T10:30:00Z",
+  "amount": 100.0,
+  "transaction_type": "QR",
+  "device_type": "Phone",
+  "network_type": "offline",
+  "phone_number": "+94770000000",
+  "location": "Western Province",
+  "prev_hash": "....",
+  "tx_hash": "....",
+  "signature": "BYPASS"
 }
 ```
 
-## Status Values
-
-Public status values returned by APIs:
+## Public Status Values
 
 - `queued`
 - `processing`
-- `security_review`
+- `retry_balance`
+- `pending_fraud`
 - `approved`
 - `rejected`
+- `security_review`
 - `duplicate`
 
-## 1) Enqueue Online Transaction
+## 1) Online Ingestion
 
-- Method: `POST`
-- Path: `/v1/transactions/online`
-
-### Response
+- `POST /v1/transactions/online`
+- Body: shared transaction payload
+- Response:
 
 ```json
 {
@@ -48,15 +47,11 @@ Public status values returned by APIs:
 }
 ```
 
-`status` can be `queued` or `duplicate`.
-
 ## 2) Offline Batch Sync
 
-- Method: `POST`
-- Path: `/v1/transactions/offline-sync`
-- Body: JSON array of transaction payload objects
-
-### Response
+- `POST /v1/transactions/offline-sync`
+- Body: array of shared transaction payloads
+- Response:
 
 ```json
 {
@@ -70,76 +65,56 @@ Public status values returned by APIs:
 }
 ```
 
-## 3) Backward-Compatible Submit Alias
+## 3) Fraud Decision Callback
 
-- Method: `POST`
-- Path: `/v1/transactions/submit`
-- Behavior: same as `/v1/transactions/online`
-- Note: deprecated; keep for compatibility only.
-
-## 4) Get Transaction Status
-
-- Method: `GET`
-- Path: `/v1/transactions/{tx_id}`
-
-Resolution order:
-
-1. If `tx_id` exists in `central_ledger`, return settled status.
-2. Else resolve from `transaction_queue` state/final status.
-
-### Response
+- `POST /v1/transactions/fraud-callback`
+- Body:
 
 ```json
 {
   "tx_id": "TXN-001",
-  "status": "processing",
+  "decision": "APPROVE",
+  "reason_code": null
+}
+```
+
+- `decision` allowed values: `APPROVE | REJECT | REVIEW`
+- Response:
+
+```json
+{
+  "tx_id": "TXN-001",
+  "status": "approved",
   "reason_code": null,
   "trace_id": "TRACE-ABC123"
 }
 ```
 
-## 5) Central Ledger Query
+## 4) Transaction Status
 
-- Method: `GET`
-- Path: `/v1/transactions`
-- Query params:
-  - `status`
-  - `sender_id`
-  - `receiver_id`
-  - `limit` (default 100)
-  - `offset` (default 0)
+- `GET /v1/transactions/{tx_id}`
+- Resolves from central ledger first, then queue metadata.
 
-## 6) Queue Inspection
+## 5) Queue Inspection
 
-- Method: `GET`
-- Path: `/v1/transactions/queue`
-- Query params:
-  - `state`
-  - `limit`
-  - `offset`
+- `GET /v1/transactions/queue`
+- Query: `state`, `limit`, `offset`
 
-Returns operational queue metadata (`attempts`, `next_attempt_at`, `final_status`, etc.).
+## 6) Ledger Query
 
-## 7) Hash Chain Verification
+- `GET /v1/transactions`
+- Query: `status`, `sender_id`, `receiver_id`, `limit`, `offset`
 
-- Method: `GET`
-- Path: `/v1/transactions/chain/verify`
-
-Verifies approved-only chain continuity.
-
-## 8) Device Endpoints
+## 7) Device APIs
 
 - `GET /v1/devices/{device_id}/balance`
 - `GET /v1/devices/{device_id}/ledger-sync`
+- `GET /v1/devices/{device_id}/local-history`
 - `GET /v1/devices`
 
 ## Error Semantics
 
-- `404`: transaction or device not found
-- `422`: invalid request payload (including empty offline sync array)
-- `200`: enqueue accepted (including duplicate detection outcome)
-
-## Eventual Consistency Contract
-
-- Enqueue endpoints do not guarantee immediate settlement.
-- Clients must poll `GET /v1/transactions/{tx_id}` for final status.
+- `400`: invalid callback decision
+- `404`: unknown tx/device
+- `422`: malformed request payload
+- `200`: accepted/processed request

@@ -1,57 +1,40 @@
 # Processing Runbook
 
-## Runtime Checklist
+## Startup Checklist
 
-1. `DATABASE_URL` points to writable SQLite path.
-2. `ENABLE_QUEUE_WORKER=true` for normal async processing.
-3. `SECURITY_ENDPOINT_URL` configured to reachable service.
-4. App starts cleanly and `/health` returns `status=ok`.
+1. `DATABASE_URL` points to writable DB.
+2. `ENABLE_QUEUE_WORKER=true`.
+3. `FRAUD_ENDPOINT_URL` configured.
+4. `/health` responds with `status=ok`.
 
-## Useful Operational Endpoints
+## Operational Endpoints
 
-- `GET /health` - service health + worker enabled flag
-- `GET /v1/transactions/queue` - inspect queue state and retries
-- `GET /v1/transactions/{tx_id}` - end-user status lookup
-- `GET /v1/transactions/chain/verify` - approved chain integrity
+- `GET /health`
+- `GET /v1/transactions/queue`
+- `GET /v1/transactions/{tx_id}`
+- `GET /v1/transactions/chain/verify`
 
 ## Common Scenarios
 
-### Transactions stay in `queued`
+### Transaction stuck in `queued`
+- Worker disabled or crashed.
+- Check startup logs and queue endpoint.
 
-- Check `ENABLE_QUEUE_WORKER` is true.
-- Check application logs for worker startup message.
-- Inspect queue via `/v1/transactions/queue`.
+### Transaction in `retry_wait`
+- Fraud endpoint unreachable/failed.
+- Check `last_error`, `attempts`, `next_attempt_at`.
 
-### Transactions cycle through retry
+### Offline transaction in `retry_balance`
+- Sender balance is still insufficient.
+- Item will be retried automatically.
+- Once funds are available and item reprocessed, it can move to `pending_fraud`.
 
-- Security endpoint may be down or timing out.
-- Inspect `last_error`, `attempts`, and `next_attempt_at` from queue endpoint.
-- Validate `SECURITY_ENDPOINT_URL` and timeout values.
+### Callback received but no state change
+- Verify `tx_id` exists in queue history.
+- Ensure callback `decision` is one of `APPROVE|REJECT|REVIEW`.
 
-### Many `security_review` outcomes
+## Recovery Guidance
 
-- Indicates repeated security integration failures or explicit security review responses.
-- Check external security API behavior and response contract.
-
-### Unexpected duplicate responses
-
-- Duplicate means `tx_id` already exists in ledger or active queue.
-- Validate mobile-side `tx_id` generation uniqueness.
-
-## Deterministic Processing Guidance
-
-For prototype determinism, run a single API process so only one in-process worker is active.
-
-Example:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Avoid multiple parallel workers/processes unless queue locking is redesigned.
-
-## Local Test Command
-
-```bash
-python -m unittest tests/test_queue_flow.py
-```
+- For failed dispatch bursts, restore fraud endpoint and let retries continue.
+- For data correction, use DB backup and replay callback with same `tx_id` (idempotent behavior expected).
+- Keep single API worker process in prototype mode for deterministic ordering.

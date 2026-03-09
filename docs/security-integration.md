@@ -1,62 +1,51 @@
-# Security Integration
+# Fraud Integration (Callback Mode)
 
-The worker performs security verification for each dequeued transaction before local settlement checks.
+This file documents the external fraud component integration.
 
-## Endpoint Configuration
-
-- Env var: `SECURITY_ENDPOINT_URL`
-- Timeout: `SECURITY_TIMEOUT_SECONDS` (default `5.0`)
-
-If `SECURITY_ENDPOINT_URL` is empty or unreachable, transport failure handling applies.
-
-## Outbound Request
+## Outbound Dispatch (Server -> Fraud Component)
 
 - Method: `POST`
-- URL: `SECURITY_ENDPOINT_URL`
-- Body: full transaction payload JSON as submitted by mobile
-
-## Expected Response Contract
+- URL: `FRAUD_ENDPOINT_URL`
+- Timeout: `FRAUD_TIMEOUT_SECONDS`
+- Payload:
 
 ```json
 {
-  "decision": "PASS | FAIL | REVIEW",
-  "reason": "optional string"
+  "trace_id": "TRACE-ABC123",
+  "source_type": "online | offline_sync",
+  "transaction": { "...full tx payload..." }
 }
 ```
 
-Decision semantics:
+Dispatch errors:
+- HTTP/network/timeout and HTTP 4xx/5xx are treated as dispatch failures.
+- Queue state moves to `retry_wait`.
+- On max retry exhaustion, transaction is marked `rejected` with `FRAUD_DISPATCH_FAILED`.
 
-- `PASS`: continue to additional/local checks
-- `FAIL`: reject transaction
-- `REVIEW`: mark `security_review`
+## Inbound Callback (Fraud Component -> Server)
 
-## Retry Policy
+- Method: `POST`
+- Path: `/v1/transactions/fraud-callback`
+- Body:
 
-Retries are applied only for transport-level failures or HTTP 5xx responses.
+```json
+{
+  "tx_id": "TXN-001",
+  "decision": "APPROVE | REJECT | REVIEW",
+  "reason_code": "optional"
+}
+```
 
-Config:
+Decision mapping:
+- `APPROVE` -> ledger `approved` (if balance valid at settlement point)
+- `REJECT` -> ledger `rejected`
+- `REVIEW` -> ledger `security_review`
 
-- `QUEUE_MAX_SECURITY_RETRIES` (default `3`)
-- `QUEUE_RETRY_BACKOFF_SECONDS` (default `2.0`)
+Offline callback side effect:
+- Updates `device_transaction_history` table for device sync visibility.
 
-Backoff schedule:
+## Required Reliability Guarantees
 
-- `next_attempt_at = now + QUEUE_RETRY_BACKOFF_SECONDS * attempts`
-
-## Failure Mapping
-
-- Transport/5xx failures before max retries: queue state -> `retry_wait`
-- Transport/5xx failures after max retries: ledger status -> `security_review`, reason `SECURITY_UNAVAILABLE`
-- HTTP 4xx from security endpoint: treated as security `FAIL`
-- Invalid JSON/decision response: treated as transport integration failure and retried
-
-## Security Data Captured in Queue
-
-The queue row stores:
-
-- `security_decision`
-- `security_reason`
-- `last_error`
-- retry metadata (`attempts`, `max_attempts`, `next_attempt_at`)
-
-This supports audit and troubleshooting without losing processing context.
+- Fraud callback endpoint is idempotent by `tx_id`.
+- If a final state already exists, callback returns existing state without duplicate writes.
+- Queue and ledger must carry `trace_id` for full audit chain.

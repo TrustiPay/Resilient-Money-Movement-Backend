@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import CentralLedger, TransactionQueue
 from app.schemas import (
+    FraudCallbackRequest,
+    FraudCallbackResponse,
     FullLedgerResponse,
     HashChainVerifyResponse,
     LedgerEntryResponse,
@@ -16,6 +18,7 @@ from app.schemas import (
     TransactionStatusResponse,
     TransactionSubmitRequest,
 )
+from app.services.fraud_callback_service import apply_fraud_callback
 from app.services.hash_service import get_last_approved_hash
 from app.services.queue_service import enqueue_offline_batch, enqueue_transaction
 
@@ -67,6 +70,27 @@ def submit_transaction_compat(
     db: Session = Depends(get_db),
 ):
     return enqueue_transaction(db, payload, source_type="online")
+
+
+@router.post(
+    "/fraud-callback",
+    response_model=FraudCallbackResponse,
+    summary="Receive final fraud decision for a transaction",
+    description=(
+        "This endpoint is called by the external fraud component after asynchronous analysis. "
+        "It finalizes the transaction in central ledger and updates offline device history when applicable."
+    ),
+)
+def fraud_callback(
+    payload: FraudCallbackRequest,
+    db: Session = Depends(get_db),
+):
+    return apply_fraud_callback(
+        db=db,
+        tx_id=payload.tx_id,
+        decision=payload.decision,
+        reason_code=payload.reason_code,
+    )
 
 
 @router.get(
@@ -170,7 +194,7 @@ def get_full_ledger(
     summary="Get transaction status",
     description=(
         "Returns current status by checking settled ledger first, then queue state. "
-        "Statuses: queued, processing, security_review, approved, rejected, duplicate."
+        "Statuses: queued, processing, retry_balance, fraud_detection_pending, security_review, approved, rejected, duplicate."
     ),
 )
 def get_transaction_status(tx_id: str, db: Session = Depends(get_db)):
@@ -195,10 +219,12 @@ def get_transaction_status(tx_id: str, db: Session = Depends(get_db)):
 
     if queued.state == "processing":
         status = "processing"
+    elif queued.state == "retry_balance":
+        status = "retry_balance"
     elif queued.state in {"queued", "retry_wait"}:
         status = "queued"
     elif queued.state == "completed":
-        status = queued.final_status or "rejected"
+        status = queued.final_status or "queued"
     else:
         status = queued.state
 

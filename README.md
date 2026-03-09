@@ -1,187 +1,95 @@
-# TrustiPay Central Ledger Backend (Queue-First)
+# TrustiPay Central Ledger Backend (Asynchronous Fraud Callback Flow)
 
-TrustiPay is an offline-first peer-to-peer digital payment research prototype.
+TrustiPay is an offline-first P2P payment backend built with FastAPI + SQLite.
 
-This backend receives transaction submissions from mobile apps, queues them durably in SQLite, then processes each transaction one-by-one through security verification and settlement checks before writing outcomes to the central ledger.
+This version supports two ingestion flows:
 
-## Key Features
+- Online transactions: written to central ledger immediately as `queued`, then sent to fraud component.
+- Offline sync transactions: queued first, validated by worker, then sent to fraud component only if validations pass.
 
-- FastAPI + SQLAlchemy + SQLite
-- Queue-first asynchronous processing
-- Separate online and offline batch ingestion endpoints
-- Outbound security verification call (configurable HTTP POST)
-- Post-security validation + fraud stub + additional checks hook
-- Central ledger with approved/rejected/security_review outcomes
-- Approved-only tamper-evident hash chain
-- Device balance settlement for approved transactions
-- Streamlit dashboard for queue flow and ledger observation
-- Swagger/OpenAPI docs at `/docs` and `/openapi.json`
+Final decision is applied through a callback endpoint from fraud component.
 
-## Project Structure
+## Core Flows
 
-```text
-trustipay-ledger-backend/
-├── app/
-│   ├── main.py
-│   ├── config.py
-│   ├── database.py
-│   ├── models.py
-│   ├── schemas.py
-│   ├── routers/
-│   │   ├── transactions.py
-│   │   └── devices.py
-│   └── services/
-│       ├── queue_service.py
-│       ├── queue_processor_service.py
-│       ├── security_service.py
-│       ├── additional_checks_service.py
-│       ├── validation_service.py
-│       ├── fraud_service.py
-│       ├── hash_service.py
-│       └── ledger_service.py
-├── docs/
-│   ├── architecture.md
-│   ├── api-contracts.md
-│   ├── security-integration.md
-│   └── processing-runbook.md
-├── tests/
-│   └── test_queue_flow.py
-├── streamlit_dashboard.py
-├── requirements.txt
-└── README.md
-```
+### Online
+1. `POST /v1/transactions/online`
+2. Transaction inserted in `central_ledger` as `queued`
+3. Queue worker dispatches transaction to fraud component
+4. Fraud component calls `POST /v1/transactions/fraud-callback`
+5. Callback updates central ledger to final status (`approved`/`rejected`/`security_review`)
 
-## Quick Start
+### Offline
+1. `POST /v1/transactions/offline-sync` (array payload)
+2. Queue worker validates each transaction:
+   - hash mismatch
+   - signature
+   - double spend
+   - duplicate
+   - central ledger balance
+3. If rejected for reason other than insufficient balance:
+   - write `rejected` to `central_ledger` with reason
+4. If rejected for `INSUFFICIENT_FUNDS`:
+   - keep queue item in `retry_balance` and retry later
+5. If validation passes:
+   - write/update `central_ledger` as `pending_fraud`
+   - dispatch to fraud component
+6. Fraud callback finalizes result and updates:
+   - `central_ledger`
+   - `device_transaction_history` (offline flow)
 
-```bash
-# 1) create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate
+## API Summary
 
-# 2) install dependencies
-pip install -r requirements.txt
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/v1/transactions/online` | Receive one online transaction |
+| POST | `/v1/transactions/offline-sync` | Receive offline pending batch |
+| POST | `/v1/transactions/fraud-callback` | Fraud component posts final decision |
+| GET | `/v1/transactions/{tx_id}` | Get transaction status |
+| GET | `/v1/transactions/queue` | Queue inspection |
+| GET | `/v1/transactions` | Central ledger query |
+| GET | `/v1/devices/{device_id}/local-history` | Offline device history mirror |
+| GET | `/v1/devices/{device_id}/ledger-sync` | Device ledger sync from central ledger |
+| GET | `/v1/devices/{device_id}/balance` | Device balance |
+| GET | `/health` | Service health |
 
-# 3) run API
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+## Status Values
 
-# 4) (optional) run dashboard in another terminal
-streamlit run streamlit_dashboard.py
-```
-
-Open:
-
-- Swagger UI: `http://localhost:8000/docs`
-- OpenAPI: `http://localhost:8000/openapi.json`
-- Streamlit Dashboard: `http://localhost:8501`
+- `queued`
+- `processing`
+- `retry_balance`
+- `pending_fraud`
+- `approved`
+- `rejected`
+- `security_review`
+- `duplicate`
 
 ## Environment Variables
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./trustipay.db` | Database connection |
-| `ENABLE_QUEUE_WORKER` | `true` | Enable in-process sequential queue worker |
-| `QUEUE_POLL_INTERVAL_SECONDS` | `1.0` | Worker poll sleep when no jobs |
-| `QUEUE_MAX_SECURITY_RETRIES` | `3` | Max retries for security transport/5xx failures |
-| `QUEUE_RETRY_BACKOFF_SECONDS` | `2.0` | Retry backoff multiplier |
-| `SECURITY_ENDPOINT_URL` | empty | External security verification endpoint |
-| `SECURITY_TIMEOUT_SECONDS` | `5.0` | Security endpoint request timeout |
+| `DATABASE_URL` | `sqlite:///./trustipay.db` | DB connection |
+| `ENABLE_QUEUE_WORKER` | `true` | Enable worker loop |
+| `QUEUE_POLL_INTERVAL_SECONDS` | `1.0` | Poll interval |
+| `QUEUE_MAX_SECURITY_RETRIES` | `3` | Max dispatch retries |
+| `QUEUE_RETRY_BACKOFF_SECONDS` | `2.0` | Retry backoff |
+| `FRAUD_ENDPOINT_URL` | empty | Fraud ingestion endpoint |
+| `FRAUD_TIMEOUT_SECONDS` | `5.0` | Fraud dispatch timeout |
 
-## API Summary
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/v1/transactions/online` | Enqueue one online transaction |
-| `POST` | `/v1/transactions/offline-sync` | Enqueue offline batch (array) |
-| `POST` | `/v1/transactions/submit` | Deprecated alias of `/online` |
-| `GET` | `/v1/transactions/{tx_id}` | Get status (queue + ledger resolved) |
-| `GET` | `/v1/transactions` | List settled ledger rows |
-| `GET` | `/v1/transactions/queue` | Inspect queue rows |
-| `GET` | `/v1/transactions/chain/verify` | Verify approved-only hash chain |
-| `GET` | `/v1/devices/{device_id}/balance` | Get settled device balance |
-| `GET` | `/v1/devices/{device_id}/ledger-sync` | Device reconciliation |
-| `GET` | `/health` | Service health |
-
-## Status Model
-
-Public statuses:
-
-- `queued`
-- `processing`
-- `security_review`
-- `approved`
-- `rejected`
-- `duplicate`
-
-### Eventual Consistency
-
-Submission endpoints only enqueue work and return immediately.
-Final settlement decisions are asynchronous; clients must poll `GET /v1/transactions/{tx_id}`.
-
-## Example Requests
-
-### Enqueue Online
+## Quick Start
 
 ```bash
-curl -X POST http://localhost:8000/v1/transactions/online \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tx_id": "TXN-ONLINE-001",
-    "sender_id": "DEV-ALICE",
-    "receiver_id": "DEV-BOB",
-    "timestamp": "2026-03-08T10:30:00Z",
-    "amount": 150.00,
-    "transaction_type": "QR",
-    "device_type": "Pixel 8",
-    "network_type": "offline",
-    "phone_number": "+94771234567",
-    "location": "Western Province",
-    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
-    "tx_hash": "<client-computed-hash>",
-    "signature": "BYPASS"
-  }'
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### Enqueue Offline Batch
+- Swagger: `http://localhost:8000/docs`
+- OpenAPI: `http://localhost:8000/openapi.json`
 
-```bash
-curl -X POST http://localhost:8000/v1/transactions/offline-sync \
-  -H "Content-Type: application/json" \
-  -d '[{...},{...}]'
-```
+## Documentation
 
-## Processing Flow
-
-1. Client submits online or offline batch item.
-2. Server validates schema and enqueues as `queued`.
-3. Background worker claims one queue row (`processing`).
-4. Worker calls security endpoint via HTTP POST.
-5. On security `PASS`: run additional checks, validation, fraud stub.
-6. Write outcome into `central_ledger`:
-   - `approved`: update balances and extend hash chain
-   - `rejected` or `security_review`: no chain extension, no balance update
-7. Queue row becomes `completed` with final status.
-
-## Dashboard
-
-`streamlit_dashboard.py` provides three views:
-
-- `Flow Monitor`: queue state breakdown, pending jobs, and recent queue activity
-- `Central Ledger`: filterable ledger table + approved chain preview
-- `Device Balances`: latest settled balances per device
-
-The dashboard reads from the same SQLite database (`DATABASE_URL`) used by the backend.
-
-## Testing
-
-Service integration tests (enqueue + processor + status resolution):
-
-```bash
-python -m unittest tests/test_queue_flow.py
-```
-
-## Documentation Index
-
-- [Architecture](docs/architecture.md)
-- [API Contracts](docs/api-contracts.md)
-- [Security Integration](docs/security-integration.md)
-- [Processing Runbook](docs/processing-runbook.md)
+- `docs/architecture.md`
+- `docs/api-contracts.md`
+- `docs/security-integration.md`
+- `docs/processing-runbook.md`

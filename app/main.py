@@ -49,22 +49,25 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.APP_NAME,
     description="""
-## TrustiPay Central Ledger Backend (Queue-First)
+## TrustiPay Central Ledger Backend (Fraud Callback Mode)
 
 TrustiPay is an offline-first peer-to-peer payment prototype where mobile clients submit transactions
 online or sync offline batches, and the central ledger processes them asynchronously.
 
 ### Processing lifecycle
 1. Mobile submits to `/v1/transactions/online` or `/v1/transactions/offline-sync`.
-2. Server enqueues each transaction (`queued`).
-3. Background worker processes one-by-one (`processing`).
-4. Worker calls external security service.
-5. If security passes, local checks + fraud checks run.
-6. Final outcome is written to `central_ledger` and can be polled from `/v1/transactions/{tx_id}`.
+2. Online items are written to central ledger with status `queued`.
+3. Background worker processes queue one-by-one.
+4. Offline items are validated (hash/signature/double-spend/duplicate/balance).
+5. Worker dispatches eligible items to external fraud component.
+6. Fraud component posts final decision to `/v1/transactions/fraud-callback`.
+7. Callback finalizes ledger and device history updates.
 
 ### Public statuses
 - `queued`
 - `processing`
+- `retry_balance`
+- `fraud_detection_pending`
 - `security_review`
 - `approved`
 - `rejected`
@@ -111,4 +114,5 @@ def health():
         "status": "ok",
         "service": "trustipay-ledger",
         "queue_worker_enabled": settings.ENABLE_QUEUE_WORKER,
+        "fraud_endpoint_configured": bool(settings.FRAUD_ENDPOINT_URL),
     }

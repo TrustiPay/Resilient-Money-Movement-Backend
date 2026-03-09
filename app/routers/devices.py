@@ -2,9 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import CentralLedger, DeviceBalance
+from app.models import CentralLedger, DeviceBalance, DeviceTransactionHistory
 from app.schemas import (
     DeviceBalanceResponse,
+    DeviceHistoryEntryResponse,
+    DeviceHistorySyncResponse,
+    DeviceStateSyncResponse,
     LedgerSyncResponse,
     LedgerEntryResponse,
 )
@@ -55,6 +58,69 @@ def ledger_sync(device_id: str, db: Session = Depends(get_db)):
 
     return LedgerSyncResponse(
         device_id=device_id,
+        total=len(rows),
+        transactions=[LedgerEntryResponse.model_validate(r) for r in rows],
+    )
+
+
+@router.get(
+    "/{device_id}/local-history",
+    response_model=DeviceHistorySyncResponse,
+    summary="Get local transaction history mirror for a device",
+    description=(
+        "Returns entries from device_transaction_history for offline synchronization tracking. "
+        "This mirrors statuses pushed after fraud callbacks."
+    ),
+)
+def local_history_sync(device_id: str, db: Session = Depends(get_db)):
+    rows = (
+        db.query(DeviceTransactionHistory)
+        .filter(
+            (DeviceTransactionHistory.sender_id == device_id) |
+            (DeviceTransactionHistory.receiver_id == device_id)
+        )
+        .order_by(DeviceTransactionHistory.history_id)
+        .all()
+    )
+    return DeviceHistorySyncResponse(
+        device_id=device_id,
+        total=len(rows),
+        transactions=[DeviceHistoryEntryResponse.model_validate(r) for r in rows],
+    )
+
+
+@router.get(
+    "/{device_id}/sync-state",
+    response_model=DeviceStateSyncResponse,
+    summary="Sync local transaction statuses and balance from central ledger",
+    description=(
+        "Returns central ledger transactions and current settled balance for the device. "
+        "Mobile app can use this as the single source of truth to update local status and wallet balance."
+    ),
+)
+def sync_state(device_id: str, db: Session = Depends(get_db)):
+    bal = db.query(DeviceBalance).filter(DeviceBalance.device_id == device_id).first()
+    if not bal:
+        bal = DeviceBalance(device_id=device_id, balance=1000.0)
+        db.add(bal)
+        db.commit()
+        db.refresh(bal)
+
+    rows = (
+        db.query(CentralLedger)
+        .filter(
+            (CentralLedger.sender_id == device_id) |
+            (CentralLedger.receiver_id == device_id)
+        )
+        .order_by(CentralLedger.ledger_index)
+        .all()
+    )
+
+    return DeviceStateSyncResponse(
+        device_id=device_id,
+        balance=bal.balance,
+        currency="LKR",
+        updated_at=str(bal.updated_at) if bal.updated_at else None,
         total=len(rows),
         transactions=[LedgerEntryResponse.model_validate(r) for r in rows],
     )

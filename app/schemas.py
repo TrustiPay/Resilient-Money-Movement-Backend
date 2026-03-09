@@ -178,3 +178,48 @@ class QueueItemResponse(BaseModel):
 class QueueListResponse(BaseModel):
     total: int
     items: List[QueueItemResponse]
+
+
+class DeviceHistoryEntryResponse(BaseModel):
+    history_id: int
+    tx_id: str
+    sender_id: str
+    receiver_id: str
+    amount: float
+    status: str
+    source_type: str
+    reason_code: Optional[str]
+    trace_id: Optional[str]
+
+    model_config = {"from_attributes": True}
+
+
+class DeviceHistorySyncResponse(BaseModel):
+    device_id: str
+    total: int
+    transactions: List[DeviceHistoryEntryResponse]
+
+
+class DeviceStateSyncResponse(BaseModel):
+    device_id: str
+    balance: float
+    currency: str = "LKR"
+    updated_at: Optional[str]
+    total: int
+    transactions: List[LedgerEntryResponse]
+
+
+class FraudCallbackRequest(BaseModel):
+    tx_id: str = Field(..., description="Transaction ID decision is for")
+    decision: str = Field(
+        ...,
+        description="CONFIRMED / APPROVE / APPROVED / REJECT / REJECTED / REVIEW / SECURITY_REVIEW",
+    )
+    reason_code: Optional[str] = Field(None, description="Optional reason code from fraud component")
+
+
+class FraudCallbackResponse(BaseModel):
+    tx_id: str
+    status: str
+    reason_code: Optional[str] = None
+    trace_id: Optional[str] = None

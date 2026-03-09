@@ -34,10 +34,12 @@ def _env_float(name: str, default: float) -> float:
 
 class Settings:
     APP_NAME = "TrustiPay Central Ledger API"
-    APP_VERSION = "2.0.0"
+    APP_VERSION = "2.1.0"
 
     SECURITY_ENDPOINT_URL = os.getenv("SECURITY_ENDPOINT_URL", "")
     SECURITY_TIMEOUT_SECONDS = _env_float("SECURITY_TIMEOUT_SECONDS", 5.0)
+    FRAUD_ENDPOINT_URL = os.getenv("FRAUD_ENDPOINT_URL", "")
+    FRAUD_TIMEOUT_SECONDS = _env_float("FRAUD_TIMEOUT_SECONDS", 5.0)
 
     QUEUE_MAX_SECURITY_RETRIES = _env_int("QUEUE_MAX_SECURITY_RETRIES", 3)
     QUEUE_RETRY_BACKOFF_SECONDS = _env_float("QUEUE_RETRY_BACKOFF_SECONDS", 2.0)

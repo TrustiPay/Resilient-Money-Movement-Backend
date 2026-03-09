@@ -1,68 +1,67 @@
 # Architecture
 
-## High-Level Components
+## Component View
 
 ```text
-Mobile App (online submit / offline batch sync)
-                  |
-                  v
-        FastAPI Transaction Router
-                  |
-                  v
-         transaction_queue (SQLite)
-                  |
-                  v
-     Sequential Queue Worker (single process)
-                  |
-                  v
-      External Security Endpoint (HTTP POST)
-                  |
-     PASS --------+--------- FAIL/REVIEW/ERROR
-      |                         |
-      v                         v
-Post-security checks      Reject/Review outcome
-(validation + fraud)              |
-      |                           v
-      +------------------> central_ledger (SQLite)
-                                  |
-                                  v
-                          Device balance updates
-                         (approved only)
+Mobile App
+  |                    Fraud Component
+  | POST /online       | POST /fraud-callback
+  | POST /offline-sync |
+  v                    v
+FastAPI Router --> transaction_queue --> Queue Worker --> Fraud Dispatch (HTTP POST)
+      |                    |                                  |
+      |                    v                                  |
+      +---------------> central_ledger <----------------------+
+                           |
+                           +--> device_balances (approved only)
+                           |
+                           +--> device_transaction_history (offline callback updates)
 ```
 
-## Persistence Model
+## Storage Responsibilities
 
-- `transaction_queue`: durable queue records and processing lifecycle.
-- `central_ledger`: settlement and audit history for processed outcomes.
-- `device_balances`: current settled balances per device.
+- `transaction_queue`: ingestion durability, processing lifecycle, retry metadata.
+- `central_ledger`: canonical transaction state and settlement audit.
+- `device_balances`: settled balances.
+- `device_transaction_history`: mirrored offline-device history updates after fraud callback.
 
-## Queue State Lifecycle
+## Queue States
 
-- `queued`: accepted by API and waiting for processing.
-- `processing`: worker currently handling the transaction.
-- `retry_wait`: security transport/5xx retry delay.
-- `completed`: worker finished and set final status (`approved`, `rejected`, `security_review`, `duplicate`).
+- `queued`: accepted and waiting.
+- `processing`: worker currently handling.
+- `retry_wait`: temporary dispatch retry.
+- `retry_balance`: offline transaction waiting for sufficient sender balance.
+- `completed`: worker finished current phase (`pending_fraud`, `rejected`, `duplicate`).
 
-## Transaction Outcome Rules
+## Central Ledger Statuses
 
-- Security `FAIL` -> `rejected` in ledger.
-- Security `REVIEW` -> `security_review` in ledger.
-- Security transport error retries exhausted -> `security_review` in ledger.
-- Security `PASS` + all checks passed -> `approved` in ledger and balances updated.
-- Duplicate detection before processing completion -> queue final status `duplicate`.
+- `queued`: online transaction persisted immediately.
+- `pending_fraud`: submitted to fraud component and waiting callback.
+- `approved`: final success, balances updated, chain extended.
+- `rejected`: final reject with reason.
+- `security_review`: review status from fraud callback.
 
-## Hash Chain Rules
+## Flow Rules
 
-- Only `approved` ledger rows extend the chain.
-- Approved transaction:
-  - `prev_hash = last approved tx_hash` (or genesis `0*64`)
-  - `tx_hash = SHA256(canonical_payload + prev_hash)`
-- Non-approved transaction:
-  - `prev_hash = NULL`
-  - `tx_hash = SHA256(canonical_payload + "")`
+### Online
+- Ingestion writes `central_ledger(status=queued)` immediately.
+- Worker dispatches to fraud endpoint.
+- Callback finalizes status.
 
-## Concurrency Model
+### Offline
+- Ingestion writes queue only.
+- Worker runs validation sequence:
+  1. hash mismatch
+  2. signature
+  3. double spend
+  4. duplicate
+  5. central balance
+- Reject reasons except `INSUFFICIENT_FUNDS` write immediate `rejected` ledger entry.
+- `INSUFFICIENT_FUNDS` remains retriable via `retry_balance`.
+- Passed validation moves to `pending_fraud` and waits callback.
 
-- Designed for prototype determinism with a single in-process worker.
-- Worker processes FIFO by ascending `queue_id`, one transaction per cycle.
-- Multi-process distributed workers are out of scope for this version.
+## Hash Chain
+
+- Only `approved` rows extend chain.
+- `prev_hash` points to last approved `tx_hash`.
+- Non-approved rows do not extend chain.
